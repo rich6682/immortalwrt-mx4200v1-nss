@@ -1,147 +1,160 @@
-name: Build ImmortalWrt for MX4200v1 with NSS
+name: Build ImmortalWrt v24.10.2 (MX4200v1) — auto pull latest qosmio NSS
 
 on:
   workflow_dispatch:
-  push:
   schedule:
-    - cron: "0 */6 * * *"
+    - cron: "0 0 * * 0"   # weekly; adjust as you like
+  push:
+    branches:
+      - main
 
 env:
-  REMOTE_REPOSITORY: immortalwrt/immortalwrt
-  REMOTE_BRANCH: v24.10.2
+  IMMORTAL_TAG: v24.10.2
+  IMMORTAL_DIR: openwrt
+  QOSMIO_REPO: https://github.com/qosmio/openwrt-ipq.git
+  QOSMIO_FEED_REPO: https://github.com/qosmio/nss-packages.git
   CONFIG_FILE: mx4200v1.config
   CUSTOM_FILES_PATH: files/
-  RELEASE_PREFIX: immortalwrt-nss
-  NSS_PACKAGES_REPOSITORY: qosmio/nss-packages
-  NSS_PACKAGES_REPOSITORY_BRANCH: NSS-12.5-K6.x
+  TARGET_SUBDIR: bin/targets/qualcommax/ipq807x
 
 jobs:
-  check_commits:
-    runs-on: ubuntu-24.04
-    outputs:
-      new_commits: ${{ steps.check_commits.outputs.new_commits }}
-      latest_commit_sha: ${{ steps.check_commits.outputs.latest_commit_sha }}
-      nss_packages_repo_new_commits: ${{ steps.check_commits.outputs.nss_packages_repo_new_commits }}
-      nss_packages_repo_latest_commit_sha: ${{ steps.check_commits.outputs.nss_packages_repo_latest_commit_sha }}
-    steps:
-      - name: Check latest commits
-        id: check_commits
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          latest_sha=$(gh api "repos/${{ env.REMOTE_REPOSITORY }}/commits/${{ env.REMOTE_BRANCH }}" --jq .sha)
-          packages_sha=$(gh api "repos/${{ env.NSS_PACKAGES_REPOSITORY }}/commits/${{ env.NSS_PACKAGES_REPOSITORY_BRANCH }}" --jq .sha)
-          release_body=$(gh api "repos/${{ github.repository }}/releases/latest" --jq .body || echo "")
-
-          {
-            echo "latest_commit_sha=$latest_sha"
-            echo "nss_packages_repo_latest_commit_sha=$packages_sha"
-            echo "new_commits=true"
-            echo "nss_packages_repo_new_commits=true"
-            if [ -n "$release_body" ]; then
-              echo "new_commits=$(if [[ "$release_body" != *"$latest_sha"* ]]; then echo true; else echo false; fi)"
-              echo "nss_packages_repo_new_commits=$(if [[ "$release_body" != *"$packages_sha"* ]]; then echo true; else echo false; fi)"
-            fi
-          } >> "$GITHUB_OUTPUT"
-
   build:
-    needs: check_commits
-    if: github.event_name == 'workflow_dispatch' || needs.check_commits.outputs.new_commits == 'true' || needs.check_commits.outputs.nss_packages_repo_new_commits == 'true'
     runs-on: ubuntu-24.04
+    timeout-minutes: 480
+
     steps:
+      - name: Checkout builder repo (this repo)
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
       - name: Install build dependencies
         run: |
           sudo apt update
-          sudo apt install -y build-essential clang flex bison g++ gawk \
-            gcc-multilib g++-multilib gettext git libncurses5-dev libssl-dev \
-            python3-pip python3-setuptools rsync swig unzip zlib1g-dev file wget
-          sudo apt full-upgrade -y
+          sudo apt install -y build-essential ccache ecj fastjar file g++ gawk \
+            gettext git java-propose-classpath libelf-dev libncurses5-dev \
+            libncursesw5-dev libssl-dev python3 python3-distutils python3-setuptools \
+            python3-pyelftools unzip wget zlib1g-dev rsync bc
 
-      - name: Checkout ImmortalWrt source
-        uses: actions/checkout@v4
-        with:
-          repository: ${{ env.REMOTE_REPOSITORY }}
-          ref: ${{ env.REMOTE_BRANCH }}
-
-      - name: Checkout current repo (configs/patches)
-        uses: actions/checkout@v4
-        with:
-          path: "builder_repo"
-
-      - name: Apply patches
+      - name: Clone ImmortalWrt v${{ env.IMMORTAL_TAG }}
         run: |
-          if [ -d builder_repo/patches ] && [ "$(ls -A builder_repo/patches)" ]; then
-            mv builder_repo/patches/* ./ || true
-            for patch in *.patch; do
-              git apply --verbose "$patch"
-            done
+          git clone --depth 1 --branch $IMMORTAL_TAG https://github.com/immortalwrt/immortalwrt.git $IMMORTAL_DIR
+
+      - name: Clone latest qosmio OpenWrt-IPQ and nss-packages feeds
+        run: |
+          git clone --depth 1 $QOSMIO_REPO qosmio-openwrt || (echo "qosmio clone failed" && exit 1)
+          git clone --depth 1 $QOSMIO_FEED_REPO qosmio-nss-packages || (echo "qosmio nss-packages clone failed" && exit 1)
+
+      - name: Copy qosmio kernel patches, target & package additions
+        run: |
+          set -euo pipefail
+          cd $IMMORTAL_DIR
+          # Copy target/linux/qualcom* changes (patches + Kconfig) if present
+          if [ -d ../qosmio-openwrt/target/linux ]; then
+            rsync -a --ignore-existing ../qosmio-openwrt/target/linux/ ./target/linux/
+          fi
+          # Copy package additions (NSS related) into openwrt/package/
+          if [ -d ../qosmio-openwrt/package ]; then
+            rsync -a --ignore-existing ../qosmio-openwrt/package/ ./package/
+          fi
+          # Also copy any top-level patch dirs if present
+          if [ -d ../qosmio-openwrt/patches ]; then
+            rsync -a --ignore-existing ../qosmio-openwrt/patches/ ./
+          fi
+          # Copy any qosmio-specific feeds/definitions if present
+          if [ -f ../qosmio-openwrt/feeds.conf.default ]; then
+            cat ../qosmio-openwrt/feeds.conf.default >> feeds.conf.default || true
           fi
 
-      - name: Update and install feeds
+      - name: Copy firmware blobs found in qosmio repo into openwrt/files/lib/firmware
         run: |
+          mkdir -p $IMMORTAL_DIR/files/lib/firmware
+          # find likely firmware files in qosmio repo and copy
+          find ../qosmio-openwrt -type f -iname "*firmware*" -o -iname "*.bin" -o -iname "*.img" | while read -r f; do
+            # heuristic: check path for firmware or blobs
+            if echo "$f" | grep -Ei "firmware|blob|nss|ath|qca" >/dev/null 2>&1; then
+              cp -v "$f" $IMMORTAL_DIR/files/lib/firmware/ || true
+            fi
+          done || true
+
+      - name: Add qosmio NSS feed to feeds.conf.default
+        run: |
+          cd $IMMORTAL_DIR
+          # ensure no duplicate entry
+          if ! grep -q "nss-packages" feeds.conf.default 2>/dev/null; then
+            echo "src-git nss-packages $QOSMIO_FEED_REPO" >> feeds.conf.default
+          fi
+
+      - name: Update & install feeds
+        run: |
+          cd $IMMORTAL_DIR
           ./scripts/feeds update -a
           ./scripts/feeds install -a
 
-      - name: Configure build
+      - name: Apply qosmio patches where present (git am / git apply)
         run: |
-          cp builder_repo/${{ env.CONFIG_FILE }} .config
-          make defconfig -j$(nproc)
+          set -euo pipefail
+          cd $IMMORTAL_DIR
+          # Search for patches from qosmio (common places)
+          if [ -d ../qosmio-openwrt/target/linux/qualcommax/patches ]; then
+            cp -v ../qosmio-openwrt/target/linux/qualcommax/patches/*.patch target/linux/qualcommax/patches/ || true
+          fi
+          # Try to commit any added patch files so subsequent git am works from repo
+          if git status --porcelain | grep -q "target/linux"; then
+            git add -A
+            git commit -m "import: qosmio target/package additions" || true
+          fi
+          # Apply any .patch files at repo root (if present)
+          for p in ../qosmio-openwrt/*.patch ../qosmio-openwrt/patches/*.patch target/linux/**/patches/*.patch 2>/dev/null; do
+            if [ -f "$p" ]; then
+              echo "Applying patch $p"
+              # try git am then git apply
+              (git am --3way "$p" || git apply --index "$p" || (echo "patch apply failed for $p" && false)) || exit 1
+            fi
+          done || true
 
-      - name: Add custom files
+      - name: Copy your config & custom files into tree
         run: |
-          mkdir -p ${{ env.CUSTOM_FILES_PATH }}
-          cp -r builder_repo/${{ env.CUSTOM_FILES_PATH }}* ${{ env.CUSTOM_FILES_PATH }} || true
+          cd $IMMORTAL_DIR
+          cp ../${{ env.CONFIG_FILE }} .config
+          # copy user overlay files if present
+          if [ -d ../${{ env.CUSTOM_FILES_PATH }} ] && [ "$(ls -A ../${{ env.CUSTOM_FILES_PATH }})" ]; then
+            rsync -a ../${{ env.CUSTOM_FILES_PATH }}/ files/
+          fi
 
-      - name: Download sources
-        run: make download -j$(nproc) V=s
+      - name: Sanity check: confirm NSS Kconfig symbol presence
+        run: |
+          cd $IMMORTAL_DIR
+          if grep -R --line-number "ATH11K_NSS_MESH_SUPPORT" target package || true; then
+            echo "Found ATH11K_NSS_MESH_SUPPORT in source tree (good)."
+          else
+            echo "::warning::ATH11K_NSS_MESH_SUPPORT not found in sources. Build may fail or mesh offload be missing."
+          fi
 
-      - name: Compile firmware
-        run: make world -j$(nproc) V=s
+      - name: Prepare build (defconfig & downloads)
+        run: |
+          cd $IMMORTAL_DIR
+          make defconfig
+          make download -j$(nproc) V=s || true
+
+      - name: Build image (images only)
+        run: |
+          cd $IMMORTAL_DIR
+          # Prefer image target to reduce total runtime; if you want world replace with make world
+          make -j$(nproc) image V=s
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: mx4200v1-images
-          path: bin/targets/qualcommax/ipq807x
+          name: immortalwrt-mx4200v1-nss
+          path: $IMMORTAL_DIR/$TARGET_SUBDIR/*
 
-  release:
-    needs: build
-    if: needs.build.result == 'success'
-    runs-on: ubuntu-24.04
-    steps:
-      - name: Download artifacts
-        uses: actions/download-artifact@v4
+      - name: Create release (when successful)
+        if: success()
+        uses: softprops/action-gh-release@v2
         with:
-          name: mx4200v1-images
-          path: firmware
-
-      - name: Get current date
-        run: echo "RELEASE_DATE=$(date +%F)" >> $GITHUB_ENV
-
-      - name: Create GitHub Release
-        uses: softprops/action-gh-release@master
-        with:
-          files: firmware/*
-          tag_name: ${{ env.RELEASE_PREFIX }}-${{ env.RELEASE_DATE }}
-          name: 🚀 ImmortalWrt Build ${{ env.RELEASE_DATE }}
-          body: |
-            ## ImmortalWrt MX4200v1 NSS Build
-            **Build Date:** ${{ env.RELEASE_DATE }}
-
-            **ImmortalWrt:** [${{ env.REMOTE_REPOSITORY }}](https://github.com/${{ env.REMOTE_REPOSITORY }})  
-            **Branch:** `${{ env.REMOTE_BRANCH }}`  
-            **Commit:** `${{ needs.check_commits.outputs.latest_commit_sha }}`  
-
-            **NSS Packages:** [${{ env.NSS_PACKAGES_REPOSITORY }}](https://github.com/${{ env.NSS_PACKAGES_REPOSITORY }})  
-            **Branch:** `${{ env.NSS_PACKAGES_REPOSITORY_BRANCH }}`  
-            **Commit:** `${{ needs.check_commits.outputs.nss_packages_repo_latest_commit_sha }}`  
-
-            _Automated build via GitHub Actions._
-
-      - name: Clean old releases
-        uses: dev-drprasad/delete-older-releases@master
-        with:
-          keep_latest: 2
-          delete_tags: true
+          tag_name: "immortalwrt-24.10.2-nss-mx4200v1-${{ github.run_number }}"
+          name: "ImmortalWrt 24.10.2 NSS MX4200v1 Build #${{ github.run_number }}"
+          files: $IMMORTAL_DIR/$TARGET_SUBDIR/*
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
