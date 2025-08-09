@@ -30,27 +30,27 @@ jobs:
 
       - name: Install build dependencies
         run: |
-          sudo apt update
-          sudo apt install -y build-essential ccache ecj fastjar file g++ gawk \
+          sudo apt-get update
+          sudo apt-get install -y build-essential ccache ecj fastjar file g++ gawk \
             gettext git java-propose-classpath libelf-dev libncurses5-dev \
-            libncursesw5-dev libssl-dev python3 python3-setuptools python3-pyelftools \
-            unzip wget zlib1g-dev rsync bc
-          # Install python3-distutils for Ubuntu 22.04+ based on current Python version
-          sudo apt install -y python3.12-distutils || sudo apt install -y python3.11-distutils || sudo apt install -y python3.10-distutils
+            libncursesw5-dev libssl-dev python3 python3-setuptools \
+            python3-pyelftools unzip wget zlib1g-dev rsync bc
+          # fix for python3-distutils on 22.04+ (python3.12 in 24.04)
+          sudo apt-get install -y python3.12-distutils || sudo apt-get install -y python3-distutils
 
       - name: Clone ImmortalWrt v${{ env.IMMORTAL_TAG }}
         run: |
-          git clone --depth 1 --branch $IMMORTAL_TAG https://github.com/immortalwrt/immortalwrt.git $IMMORTAL_DIR
+          git clone --depth 1 --branch "$IMMORTAL_TAG" https://github.com/immortalwrt/immortalwrt.git "$IMMORTAL_DIR"
 
       - name: Clone latest qosmio OpenWrt-IPQ and nss-packages feeds
         run: |
-          git clone --depth 1 $QOSMIO_REPO qosmio-openwrt || (echo "qosmio clone failed" && exit 1)
-          git clone --depth 1 $QOSMIO_FEED_REPO qosmio-nss-packages || (echo "qosmio nss-packages clone failed" && exit 1)
+          git clone --depth 1 "$QOSMIO_REPO" qosmio-openwrt || (echo "qosmio clone failed" && exit 1)
+          git clone --depth 1 "$QOSMIO_FEED_REPO" qosmio-nss-packages || (echo "qosmio nss-packages clone failed" && exit 1)
 
       - name: Copy qosmio kernel patches, target & package additions
         run: |
           set -euo pipefail
-          cd $IMMORTAL_DIR
+          cd "$IMMORTAL_DIR"
           if [ -d ../qosmio-openwrt/target/linux ]; then
             rsync -a --ignore-existing ../qosmio-openwrt/target/linux/ ./target/linux/
           fi
@@ -66,30 +66,31 @@ jobs:
 
       - name: Copy firmware blobs found in qosmio repo into openwrt/files/lib/firmware
         run: |
-          mkdir -p $IMMORTAL_DIR/files/lib/firmware
-          find ../qosmio-openwrt -type f -iname "*firmware*" -o -iname "*.bin" -o -iname "*.img" | while read -r f; do
+          mkdir -p "$IMMORTAL_DIR/files/lib/firmware"
+          find ../qosmio-openwrt \
+            -type f \( -iname "*firmware*" -o -iname "*.bin" -o -iname "*.img" \) | while read -r f; do
             if echo "$f" | grep -Ei "firmware|blob|nss|ath|qca" >/dev/null 2>&1; then
-              cp -v "$f" $IMMORTAL_DIR/files/lib/firmware/ || true
+              cp -v "$f" "$IMMORTAL_DIR/files/lib/firmware/" || true
             fi
           done || true
 
       - name: Add qosmio NSS feed to feeds.conf.default
         run: |
-          cd $IMMORTAL_DIR
+          cd "$IMMORTAL_DIR"
           if ! grep -q "nss-packages" feeds.conf.default 2>/dev/null; then
             echo "src-git nss-packages $QOSMIO_FEED_REPO" >> feeds.conf.default
           fi
 
       - name: Update & install feeds
         run: |
-          cd $IMMORTAL_DIR
+          cd "$IMMORTAL_DIR"
           ./scripts/feeds update -a
           ./scripts/feeds install -a
 
       - name: Apply qosmio patches where present (git am / git apply)
         run: |
           set -euo pipefail
-          cd $IMMORTAL_DIR
+          cd "$IMMORTAL_DIR"
           if [ -d ../qosmio-openwrt/target/linux/qualcommax/patches ]; then
             cp -v ../qosmio-openwrt/target/linux/qualcommax/patches/*.patch target/linux/qualcommax/patches/ || true
           fi
@@ -97,7 +98,7 @@ jobs:
             git add -A
             git commit -m "import: qosmio target/package additions" || true
           fi
-          for p in ../qosmio-openwrt/*.patch ../qosmio-openwrt/patches/*.patch target/linux/**/patches/*.patch 2>/dev/null; do
+          for p in "../qosmio-openwrt/"*.patch "../qosmio-openwrt/patches/"*.patch "target/linux/**/patches/"*.patch 2>/dev/null; do
             if [ -f "$p" ]; then
               echo "Applying patch $p"
               (git am --3way "$p" || git apply --index "$p" || (echo "patch apply failed for $p" && false)) || exit 1
@@ -106,15 +107,15 @@ jobs:
 
       - name: Copy your config & custom files into tree
         run: |
-          cd $IMMORTAL_DIR
-          cp ../${{ env.CONFIG_FILE }} .config
-          if [ -d ../${{ env.CUSTOM_FILES_PATH }} ] && [ "$(ls -A ../${{ env.CUSTOM_FILES_PATH }})" ]; then
-            rsync -a ../${{ env.CUSTOM_FILES_PATH }}/ files/
+          cd "$IMMORTAL_DIR"
+          cp "../${CONFIG_FILE}" .config
+          if [ -d "../${CUSTOM_FILES_PATH}" ] && [ "$(ls -A ../${CUSTOM_FILES_PATH})" ]; then
+            rsync -a ../${CUSTOM_FILES_PATH}/ files/
           fi
 
       - name: Sanity check: confirm NSS Kconfig symbol presence
         run: |
-          cd $IMMORTAL_DIR
+          cd "$IMMORTAL_DIR"
           if grep -R --line-number "ATH11K_NSS_MESH_SUPPORT" target package || true; then
             echo "Found ATH11K_NSS_MESH_SUPPORT in source tree (good)."
           else
@@ -123,20 +124,20 @@ jobs:
 
       - name: Prepare build (defconfig & downloads)
         run: |
-          cd $IMMORTAL_DIR
+          cd "$IMMORTAL_DIR"
           make defconfig
-          make download -j$(nproc) V=s || true
+          make download -j"$(nproc)" V=s || true
 
       - name: Build image (images only)
         run: |
-          cd $IMMORTAL_DIR
-          make -j$(nproc) image V=s
+          cd "$IMMORTAL_DIR"
+          make -j"$(nproc)" image V=s
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
           name: immortalwrt-mx4200v1-nss
-          path: $IMMORTAL_DIR/$TARGET_SUBDIR/*
+          path: ${{ env.IMMORTAL_DIR }}/${{ env.TARGET_SUBDIR }}/*
 
       - name: Create release (when successful)
         if: success()
@@ -144,6 +145,6 @@ jobs:
         with:
           tag_name: "immortalwrt-24.10.2-nss-mx4200v1-${{ github.run_number }}"
           name: "ImmortalWrt 24.10.2 NSS MX4200v1 Build #${{ github.run_number }}"
-          files: $IMMORTAL_DIR/$TARGET_SUBDIR/*
+          files: ${{ env.IMMORTAL_DIR }}/${{ env.TARGET_SUBDIR }}/*
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
