@@ -3,7 +3,7 @@ name: Build ImmortalWrt v24.10.2 (MX4200v1) — auto pull latest qosmio NSS
 on:
   workflow_dispatch:
   schedule:
-    - cron: "0 0 * * 0"   # weekly; adjust as you like
+    - cron: "0 0 * * 0" # weekly; adjust as you like
   push:
     branches:
       - main
@@ -33,10 +33,8 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y build-essential ccache ecj fastjar file g++ gawk \
             gettext git java-propose-classpath libelf-dev libncurses5-dev \
-            libncursesw5-dev libssl-dev python3 python3-setuptools \
+            libncursesw5-dev libssl-dev python3 python3.12-distutils python3-setuptools \
             python3-pyelftools unzip wget zlib1g-dev rsync bc
-          # fix for python3-distutils on 22.04+ (python3.12 in 24.04)
-          sudo apt-get install -y python3.12-distutils || sudo apt-get install -y python3-distutils
 
       - name: Clone ImmortalWrt v${{ env.IMMORTAL_TAG }}
         run: |
@@ -52,99 +50,4 @@ jobs:
           set -euo pipefail
           cd "$IMMORTAL_DIR"
           if [ -d ../qosmio-openwrt/target/linux ]; then
-            rsync -a --ignore-existing ../qosmio-openwrt/target/linux/ ./target/linux/
-          fi
-          if [ -d ../qosmio-openwrt/package ]; then
-            rsync -a --ignore-existing ../qosmio-openwrt/package/ ./package/
-          fi
-          if [ -d ../qosmio-openwrt/patches ]; then
-            rsync -a --ignore-existing ../qosmio-openwrt/patches/ ./
-          fi
-          if [ -f ../qosmio-openwrt/feeds.conf.default ]; then
-            cat ../qosmio-openwrt/feeds.conf.default >> feeds.conf.default || true
-          fi
-
-      - name: Copy firmware blobs found in qosmio repo into openwrt/files/lib/firmware
-        run: |
-          mkdir -p "$IMMORTAL_DIR/files/lib/firmware"
-          find ../qosmio-openwrt \
-            -type f \( -iname "*firmware*" -o -iname "*.bin" -o -iname "*.img" \) | while read -r f; do
-            if echo "$f" | grep -Ei "firmware|blob|nss|ath|qca" >/dev/null 2>&1; then
-              cp -v "$f" "$IMMORTAL_DIR/files/lib/firmware/" || true
-            fi
-          done || true
-
-      - name: Add qosmio NSS feed to feeds.conf.default
-        run: |
-          cd "$IMMORTAL_DIR"
-          if ! grep -q "nss-packages" feeds.conf.default 2>/dev/null; then
-            echo "src-git nss-packages $QOSMIO_FEED_REPO" >> feeds.conf.default
-          fi
-
-      - name: Update & install feeds
-        run: |
-          cd "$IMMORTAL_DIR"
-          ./scripts/feeds update -a
-          ./scripts/feeds install -a
-
-      - name: Apply qosmio patches where present (git am / git apply)
-        run: |
-          set -euo pipefail
-          cd "$IMMORTAL_DIR"
-          if [ -d ../qosmio-openwrt/target/linux/qualcommax/patches ]; then
-            cp -v ../qosmio-openwrt/target/linux/qualcommax/patches/*.patch target/linux/qualcommax/patches/ || true
-          fi
-          if git status --porcelain | grep -q "target/linux"; then
-            git add -A
-            git commit -m "import: qosmio target/package additions" || true
-          fi
-          for p in "../qosmio-openwrt/"*.patch "../qosmio-openwrt/patches/"*.patch "target/linux/**/patches/"*.patch 2>/dev/null; do
-            if [ -f "$p" ]; then
-              echo "Applying patch $p"
-              (git am --3way "$p" || git apply --index "$p" || (echo "patch apply failed for $p" && false)) || exit 1
-            fi
-          done || true
-
-      - name: Copy your config & custom files into tree
-        run: |
-          cd "$IMMORTAL_DIR"
-          cp "../${CONFIG_FILE}" .config
-          if [ -d "../${CUSTOM_FILES_PATH}" ] && [ "$(ls -A ../${CUSTOM_FILES_PATH})" ]; then
-            rsync -a ../${CUSTOM_FILES_PATH}/ files/
-          fi
-
-      - name: Sanity check: confirm NSS Kconfig symbol presence
-        run: |
-          cd "$IMMORTAL_DIR"
-          if grep -R --line-number "ATH11K_NSS_MESH_SUPPORT" target package || true; then
-            echo "Found ATH11K_NSS_MESH_SUPPORT in source tree (good)."
-          else
-            echo "::warning::ATH11K_NSS_MESH_SUPPORT not found in sources. Build may fail or mesh offload be missing."
-          fi
-
-      - name: Prepare build (defconfig & downloads)
-        run: |
-          cd "$IMMORTAL_DIR"
-          make defconfig
-          make download -j"$(nproc)" V=s || true
-
-      - name: Build image (images only)
-        run: |
-          cd "$IMMORTAL_DIR"
-          make -j"$(nproc)" image V=s
-
-      - name: Upload artifacts
-        uses: actions/upload-artifact@v4
-        with:
-          name: immortalwrt-mx4200v1-nss
-          path: ${{ env.IMMORTAL_DIR }}/${{ env.TARGET_SUBDIR }}/*
-
-      - name: Create release (when successful)
-        if: success()
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: "immortalwrt-24.10.2-nss-mx4200v1-${{ github.run_number }}"
-          name: "ImmortalWrt 24.10.2 NSS MX4200v1 Build #${{ github.run_number }}"
-          files: ${{ env.IMMORTAL_DIR }}/${{ env.TARGET_SUBDIR }}/*
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+            rsync
