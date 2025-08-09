@@ -1,4 +1,4 @@
-name: "Build ImmortalWrt v24.10.2 (MX4200v1) - auto pull latest qosmio NSS"
+name: Build ImmortalWrt v24.10.2 (MX4200v1) — auto pull latest qosmio NSS
 
 on:
   workflow_dispatch:
@@ -23,29 +23,31 @@ jobs:
     timeout-minutes: 480
 
     steps:
-      - name: "Checkout builder repo (this repo)"
+      - name: Checkout builder repo (this repo)
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
-      - name: "Install build dependencies"
+      - name: Install build dependencies
         run: |
           sudo apt update
           sudo apt install -y build-essential ccache ecj fastjar file g++ gawk \
             gettext git java-propose-classpath libelf-dev libncurses5-dev \
-            libncursesw5-dev libssl-dev python3 python3-distutils python3-setuptools \
-            python3-pyelftools unzip wget zlib1g-dev rsync bc
+            libncursesw5-dev libssl-dev python3 python3-setuptools python3-pyelftools \
+            unzip wget zlib1g-dev rsync bc
+          # Install python3-distutils for Ubuntu 22.04+ based on current Python version
+          sudo apt install -y python3.12-distutils || sudo apt install -y python3.11-distutils || sudo apt install -y python3.10-distutils
 
-      - name: "Clone ImmortalWrt v${{ env.IMMORTAL_TAG }}"
+      - name: Clone ImmortalWrt v${{ env.IMMORTAL_TAG }}
         run: |
           git clone --depth 1 --branch $IMMORTAL_TAG https://github.com/immortalwrt/immortalwrt.git $IMMORTAL_DIR
 
-      - name: "Clone latest qosmio OpenWrt-IPQ and nss-packages feeds"
+      - name: Clone latest qosmio OpenWrt-IPQ and nss-packages feeds
         run: |
           git clone --depth 1 $QOSMIO_REPO qosmio-openwrt || (echo "qosmio clone failed" && exit 1)
           git clone --depth 1 $QOSMIO_FEED_REPO qosmio-nss-packages || (echo "qosmio nss-packages clone failed" && exit 1)
 
-      - name: "Copy qosmio kernel patches, target & package additions"
+      - name: Copy qosmio kernel patches, target & package additions
         run: |
           set -euo pipefail
           cd $IMMORTAL_DIR
@@ -62,29 +64,29 @@ jobs:
             cat ../qosmio-openwrt/feeds.conf.default >> feeds.conf.default || true
           fi
 
-      - name: "Copy firmware blobs found in qosmio repo into openwrt/files/lib/firmware"
+      - name: Copy firmware blobs found in qosmio repo into openwrt/files/lib/firmware
         run: |
           mkdir -p $IMMORTAL_DIR/files/lib/firmware
-          find ../qosmio-openwrt -type f \( -iname "*firmware*" -o -iname "*.bin" -o -iname "*.img" \) | while read -r f; do
+          find ../qosmio-openwrt -type f -iname "*firmware*" -o -iname "*.bin" -o -iname "*.img" | while read -r f; do
             if echo "$f" | grep -Ei "firmware|blob|nss|ath|qca" >/dev/null 2>&1; then
               cp -v "$f" $IMMORTAL_DIR/files/lib/firmware/ || true
             fi
           done || true
 
-      - name: "Add qosmio NSS feed to feeds.conf.default"
+      - name: Add qosmio NSS feed to feeds.conf.default
         run: |
           cd $IMMORTAL_DIR
           if ! grep -q "nss-packages" feeds.conf.default 2>/dev/null; then
             echo "src-git nss-packages $QOSMIO_FEED_REPO" >> feeds.conf.default
           fi
 
-      - name: "Update & install feeds"
+      - name: Update & install feeds
         run: |
           cd $IMMORTAL_DIR
           ./scripts/feeds update -a
           ./scripts/feeds install -a
 
-      - name: "Apply qosmio patches where present (git am / git apply)"
+      - name: Apply qosmio patches where present (git am / git apply)
         run: |
           set -euo pipefail
           cd $IMMORTAL_DIR
@@ -102,7 +104,7 @@ jobs:
             fi
           done || true
 
-      - name: "Copy your config & custom files into tree"
+      - name: Copy your config & custom files into tree
         run: |
           cd $IMMORTAL_DIR
           cp ../${{ env.CONFIG_FILE }} .config
@@ -110,7 +112,7 @@ jobs:
             rsync -a ../${{ env.CUSTOM_FILES_PATH }}/ files/
           fi
 
-      - name: "Sanity check: confirm NSS Kconfig symbol presence"
+      - name: Sanity check: confirm NSS Kconfig symbol presence
         run: |
           cd $IMMORTAL_DIR
           if grep -R --line-number "ATH11K_NSS_MESH_SUPPORT" target package || true; then
@@ -119,24 +121,24 @@ jobs:
             echo "::warning::ATH11K_NSS_MESH_SUPPORT not found in sources. Build may fail or mesh offload be missing."
           fi
 
-      - name: "Prepare build (defconfig & downloads)"
+      - name: Prepare build (defconfig & downloads)
         run: |
           cd $IMMORTAL_DIR
           make defconfig
           make download -j$(nproc) V=s || true
 
-      - name: "Build image (images only)"
+      - name: Build image (images only)
         run: |
           cd $IMMORTAL_DIR
           make -j$(nproc) image V=s
 
-      - name: "Upload artifacts"
+      - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
           name: immortalwrt-mx4200v1-nss
           path: $IMMORTAL_DIR/$TARGET_SUBDIR/*
 
-      - name: "Create release (when successful)"
+      - name: Create release (when successful)
         if: success()
         uses: softprops/action-gh-release@v2
         with:
